@@ -1,0 +1,496 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Profile {
+  id                     String                    @id @db.Uuid
+  username               String                    @unique
+  displayName            String?
+  bio                    String?
+  pronouns               String?
+  website                String?
+  photoUrl               String?
+  isPrivate              Boolean                   @default(false)
+  defaultWardrobePrivacy String                    @default("FOLLOWERS") // pre-fills Publish's privacy choice; each wardrobe's own privacy is still what's enforced
+  whoCanTagMe            String                    @default("EVERYONE") // EVERYONE | FOLLOWING | NO_ONE
+  requireTagApproval     Boolean                   @default(false)
+  whoCanMentionMe        String                    @default("EVERYONE") // EVERYONE | FOLLOWING | NO_ONE
+  createdAt              DateTime                  @default(now())
+  updatedAt              DateTime                  @updatedAt
+  following              Follow[]                  @relation("FollowerRel")
+  followers              Follow[]                  @relation("FollowingRel")
+  posts                  Post[]
+  postLikes              PostLike[]
+  savedPosts             SavedPost[]
+  comments               Comment[]
+  commentLikes           CommentLike[]
+  categories             Category[]
+  items                  Item[]
+  wardrobeOccasions      WardrobeOccasion[]
+  wardrobes              Wardrobe[]
+  wardrobeSelectedFor    WardrobeSelectedViewer[]
+  postSelectedFor        PostSelectedViewer[]
+  stories                Story[]
+  storySelectedFor       StorySelectedViewer[]
+  storyViews             StoryView[]
+  conversationsIn        ConversationParticipant[]
+  messagesSent           Message[]
+  notificationsReceived  Notification[]            @relation("NotificationRecipient")
+  notificationsActedOn   Notification[]            @relation("NotificationActor")
+  blocking               Block[]                   @relation("BlockerRel")
+  blockedBy              Block[]                   @relation("BlockedRel")
+  tagsReceived           PostUserTag[]             @relation("UserTagged")
+  mentionsReceived       Mention[]                 @relation("MentionedUser")
+
+  @@map("profiles")
+}
+
+model Follow {
+  followerId  String   @db.Uuid
+  followingId String   @db.Uuid
+  status      String   @default("ACCEPTED")
+  createdAt   DateTime @default(now())
+
+  follower  Profile @relation("FollowerRel", fields: [followerId], references: [id], onDelete: Cascade)
+  following Profile @relation("FollowingRel", fields: [followingId], references: [id], onDelete: Cascade)
+
+  @@id([followerId, followingId])
+  @@index([followingId])
+  @@map("follows")
+}
+
+// Blocking is independent of Follow - blocking someone also removes any
+// existing follow edge between the two (handled in the route, not here).
+model Block {
+  blockerId String   @db.Uuid
+  blockedId String   @db.Uuid
+  createdAt DateTime @default(now())
+
+  blocker Profile @relation("BlockerRel", fields: [blockerId], references: [id], onDelete: Cascade)
+  blocked Profile @relation("BlockedRel", fields: [blockedId], references: [id], onDelete: Cascade)
+
+  @@id([blockerId, blockedId])
+  @@index([blockedId])
+  @@map("blocks")
+}
+
+model Post {
+  id             String   @id @default(uuid()) @db.Uuid
+  authorId       String   @db.Uuid
+  imageUrl       String? // legacy: full URL, used by older/seed posts that predate coverPhotoPath
+  coverPhotoPath String? // new posts: path inside the private "closet-items" bucket, signed into a URL at request time
+  caption        String?
+  hashtags       String[] @default([]) // extracted from the caption server-side; display-only for now, no dedicated hashtag search yet
+  privacy        String   @default("FOLLOWERS") // EVERYONE | FOLLOWERS | SELECTED - no ONLY_ME, same reasoning as wardrobes but a private post makes no sense here
+  wardrobeId     String?  @db.Uuid // set when this post was created via "Post to Feed" from a wardrobe; null for a plain direct post
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  author          Profile              @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  wardrobe        Wardrobe?            @relation(fields: [wardrobeId], references: [id], onDelete: SetNull) // if the wardrobe is later deleted, the post survives as a plain post
+  itemTags        PostItemTag[]
+  userTags        PostUserTag[]
+  likes           PostLike[]
+  saves           SavedPost[]
+  comments        Comment[]
+  selectedViewers PostSelectedViewer[]
+  notifications   Notification[]
+
+  @@index([authorId, createdAt])
+  @@index([wardrobeId])
+  @@map("posts")
+}
+
+model PostSelectedViewer {
+  postId   String @db.Uuid
+  viewerId String @db.Uuid
+
+  post   Post    @relation(fields: [postId], references: [id], onDelete: Cascade)
+  viewer Profile @relation(fields: [viewerId], references: [id], onDelete: Cascade)
+
+  @@id([postId, viewerId])
+  @@map("post_selected_viewers")
+}
+
+model PostItemTag {
+  id     String  @id @default(uuid()) @db.Uuid
+  postId String  @db.Uuid
+  brand  String
+  label  String?
+  x      Float
+  y      Float
+
+  post Post @relation(fields: [postId], references: [id], onDelete: Cascade)
+
+  @@index([postId])
+  @@map("post_item_tags")
+}
+
+// Tagging a PERSON in a post (Instagram-style), optionally pointing at one of
+// their own closet items for the "this is their garment" framing. Needs
+// approval from the tagged person when requireTagApproval is on for them.
+model PostUserTag {
+  id           String   @id @default(uuid()) @db.Uuid
+  postId       String   @db.Uuid
+  taggedUserId String   @db.Uuid
+  itemId       String?  @db.Uuid
+  status       String   @default("PENDING") // PENDING | APPROVED | REJECTED
+  createdAt    DateTime @default(now())
+
+  post       Post    @relation(fields: [postId], references: [id], onDelete: Cascade)
+  taggedUser Profile @relation("UserTagged", fields: [taggedUserId], references: [id], onDelete: Cascade)
+  item       Item?   @relation(fields: [itemId], references: [id], onDelete: SetNull)
+
+  @@index([postId])
+  @@index([taggedUserId, status])
+  @@map("post_user_tags")
+}
+
+model PostLike {
+  postId    String   @db.Uuid
+  userId    String   @db.Uuid
+  createdAt DateTime @default(now())
+
+  post Post    @relation(fields: [postId], references: [id], onDelete: Cascade)
+  user Profile @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([postId, userId])
+  @@map("post_likes")
+}
+
+model SavedPost {
+  postId    String   @db.Uuid
+  userId    String   @db.Uuid
+  createdAt DateTime @default(now())
+
+  post Post    @relation(fields: [postId], references: [id], onDelete: Cascade)
+  user Profile @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([postId, userId])
+  @@map("saved_posts")
+}
+
+model Comment {
+  id        String   @id @default(uuid()) @db.Uuid
+  postId    String   @db.Uuid
+  authorId  String   @db.Uuid
+  parentId  String?  @db.Uuid
+  body      String
+  createdAt DateTime @default(now())
+
+  post          Post           @relation(fields: [postId], references: [id], onDelete: Cascade)
+  author        Profile        @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  parent        Comment?       @relation("CommentReplies", fields: [parentId], references: [id], onDelete: Cascade)
+  replies       Comment[]      @relation("CommentReplies")
+  likes         CommentLike[]
+  mentions      Mention[]
+  notifications Notification[]
+
+  @@index([postId, createdAt])
+  @@map("comments")
+}
+
+model CommentLike {
+  commentId String   @db.Uuid
+  userId    String   @db.Uuid
+  createdAt DateTime @default(now())
+
+  comment Comment @relation(fields: [commentId], references: [id], onDelete: Cascade)
+  user    Profile @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([commentId, userId])
+  @@map("comment_likes")
+}
+
+// Minimal: recorded when an @username in a comment is allowed by the
+// mentioned user's whoCanMentionMe preference. Nothing surfaces these yet
+// (no notification, no special render) - this just stores the fact.
+model Mention {
+  id              String   @id @default(uuid()) @db.Uuid
+  commentId       String   @db.Uuid
+  mentionedUserId String   @db.Uuid
+  createdAt       DateTime @default(now())
+
+  comment       Comment @relation(fields: [commentId], references: [id], onDelete: Cascade)
+  mentionedUser Profile @relation("MentionedUser", fields: [mentionedUserId], references: [id], onDelete: Cascade)
+
+  @@index([mentionedUserId])
+  @@map("mentions")
+}
+
+// ---------- Stories (24-hour ephemeral) ----------
+// Expiry is soft: a story past expiresAt simply stops matching in queries -
+// nothing deletes it from the database or storage automatically. A
+// scheduled hard-purge job is a reasonable later addition, not built here.
+model Story {
+  id        String   @id @default(uuid()) @db.Uuid
+  authorId  String   @db.Uuid
+  imagePath String // path inside the private "closet-items" bucket, signed into a URL at request time
+  caption   String? // the text overlay shown on the story
+  privacy   String   @default("FOLLOWERS") // EVERYONE | FOLLOWERS | SELECTED - same three-tier model as wardrobes/posts
+  createdAt DateTime @default(now())
+  expiresAt DateTime // createdAt + 24h, set once at creation time
+
+  author          Profile               @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  itemTags        StoryItemTag[]
+  views           StoryView[]
+  selectedViewers StorySelectedViewer[]
+
+  @@index([authorId, createdAt])
+  @@index([expiresAt])
+  @@map("stories")
+}
+
+model StorySelectedViewer {
+  storyId  String @db.Uuid
+  viewerId String @db.Uuid
+
+  story  Story   @relation(fields: [storyId], references: [id], onDelete: Cascade)
+  viewer Profile @relation(fields: [viewerId], references: [id], onDelete: Cascade)
+
+  @@id([storyId, viewerId])
+  @@map("story_selected_viewers")
+}
+
+model StoryItemTag {
+  id      String  @id @default(uuid()) @db.Uuid
+  storyId String  @db.Uuid
+  brand   String
+  label   String?
+  x       Float
+  y       Float
+
+  story Story @relation(fields: [storyId], references: [id], onDelete: Cascade)
+
+  @@index([storyId])
+  @@map("story_item_tags")
+}
+
+// One row per (story, viewer) - the viewer list and total view count both
+// come straight from this table. No separate "reactions" or "tap" tracking.
+model StoryView {
+  storyId   String   @db.Uuid
+  viewerId  String   @db.Uuid
+  createdAt DateTime @default(now())
+
+  story  Story   @relation(fields: [storyId], references: [id], onDelete: Cascade)
+  viewer Profile @relation(fields: [viewerId], references: [id], onDelete: Cascade)
+
+  @@id([storyId, viewerId])
+  @@map("story_views")
+}
+
+// ---------- Direct Messages ----------
+// One conversation per PAIR of users, reused across every message they ever
+// send each other. participant.status governs the request/primary split:
+// the SENDER's own row is always ACCEPTED; the RECIPIENT's row starts
+// PENDING on the first message from someone they've never accepted before,
+// and flips to ACCEPTED when they tap Accept, or DECLINED if they decline.
+// A later message into a DECLINED thread flips the recipient back to
+// PENDING, reopening it as a request rather than creating a duplicate thread.
+model Conversation {
+  id            String   @id @default(uuid()) @db.Uuid
+  createdAt     DateTime @default(now())
+  lastMessageAt DateTime @default(now())
+
+  participants  ConversationParticipant[]
+  messages      Message[]
+  notifications Notification[]
+
+  @@map("conversations")
+}
+
+model ConversationParticipant {
+  conversationId String    @db.Uuid
+  userId         String    @db.Uuid
+  status         String    @default("ACCEPTED") // ACCEPTED | PENDING | DECLINED
+  lastReadAt     DateTime? // "seen up to" marker for THIS user - the basis for the other person's "Seen" label
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  user         Profile      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([conversationId, userId])
+  @@index([userId, status])
+  @@map("conversation_participants")
+}
+
+model Message {
+  id             String   @id @default(uuid()) @db.Uuid
+  conversationId String   @db.Uuid
+  senderId       String   @db.Uuid
+  body           String?
+  imagePath      String? // optional single attachment, private bucket, signed into a URL at request time - same pattern as everything else
+  createdAt      DateTime @default(now())
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  sender       Profile      @relation(fields: [senderId], references: [id], onDelete: Cascade)
+
+  @@index([conversationId, createdAt])
+  @@map("messages")
+}
+
+// ---------- Notifications ----------
+// type: LIKE | COMMENT | FOLLOW_REQUEST | FOLLOW_ACCEPTED | MESSAGE_REQUEST | MENTION | TAG
+// postId/commentId/conversationId are set depending on type - only one is
+// ever populated for a given notification, the rest stay null.
+model Notification {
+  id             String   @id @default(uuid()) @db.Uuid
+  recipientId    String   @db.Uuid
+  actorId        String?  @db.Uuid // who triggered it; null is never used today but keeps the door open for a future system-generated notification
+  type           String
+  postId         String?  @db.Uuid
+  commentId      String?  @db.Uuid
+  conversationId String?  @db.Uuid
+  read           Boolean  @default(false)
+  createdAt      DateTime @default(now())
+
+  recipient    Profile       @relation("NotificationRecipient", fields: [recipientId], references: [id], onDelete: Cascade)
+  actor        Profile?      @relation("NotificationActor", fields: [actorId], references: [id], onDelete: Cascade)
+  post         Post?         @relation(fields: [postId], references: [id], onDelete: Cascade)
+  comment      Comment?      @relation(fields: [commentId], references: [id], onDelete: Cascade)
+  conversation Conversation? @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@index([recipientId, createdAt])
+  @@index([recipientId, read])
+  @@map("notifications")
+}
+
+model NotificationPreference {
+  userId         String   @id @db.Uuid
+  pauseAll       Boolean  @default(false)
+  likes          String   @default("FOLLOWING")
+  comments       String   @default("EVERYONE")
+  followRequests Boolean  @default(true)
+  updatedAt      DateTime @updatedAt
+
+  @@map("notification_preferences")
+}
+
+// ---------- Closet (garments) ----------
+
+// User-created only - there is no app-defined or admin-managed category list.
+// "Suggested categories" shown in the app's Add Category screen are static UI
+// copy, not rows in this table.
+model Category {
+  id        String   @id @default(uuid()) @db.Uuid
+  ownerId   String   @db.Uuid
+  name      String
+  createdAt DateTime @default(now())
+
+  owner Profile @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  items Item[]
+
+  @@unique([ownerId, name])
+  @@index([ownerId])
+  @@map("closet_categories")
+}
+
+model Item {
+  id               String   @id @default(uuid()) @db.Uuid
+  ownerId          String   @db.Uuid
+  categoryId       String   @db.Uuid
+  careInstructions String?
+  purchasePrice    Float? // TODO confirm currency handling with client
+  isFavorite       Boolean  @default(false)
+  status           String   @default("ACTIVE") // ACTIVE | ARCHIVED
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  owner               Profile        @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  category            Category       @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  photos              ItemPhoto[]
+  wardrobeMemberships WardrobeItem[]
+  taggedInPosts       PostUserTag[]
+
+  @@index([ownerId, categoryId])
+  @@index([ownerId, status])
+  @@map("closet_items")
+}
+
+model ItemPhoto {
+  id          String   @id @default(uuid()) @db.Uuid
+  itemId      String   @db.Uuid
+  storagePath String // path inside the private "closet-items" bucket - never a public URL
+  angleLabel  String? // 'front' | 'side45' | 'back' | 'details' | null - suggested only, not enforced
+  position    Int // 0-4, display order; up to 5 photos per item
+  createdAt   DateTime @default(now())
+
+  item Item @relation(fields: [itemId], references: [id], onDelete: Cascade)
+
+  @@index([itemId, position])
+  @@map("closet_item_photos")
+}
+
+// ---------- Wardrobes (curated collections built from closet items) ----------
+
+// User-created only, same pattern as Category - no app-defined occasion list.
+model WardrobeOccasion {
+  id        String   @id @default(uuid()) @db.Uuid
+  ownerId   String   @db.Uuid
+  name      String
+  createdAt DateTime @default(now())
+
+  owner     Profile    @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  wardrobes Wardrobe[]
+
+  @@unique([ownerId, name])
+  @@index([ownerId])
+  @@map("wardrobe_occasions")
+}
+
+model Wardrobe {
+  id             String   @id @default(uuid()) @db.Uuid
+  ownerId        String   @db.Uuid
+  name           String
+  description    String?
+  occasionId     String?  @db.Uuid
+  coverPhotoPath String? // defaults to the first selected item's first photo if not set explicitly
+  privacy        String   @default("FOLLOWERS") // EVERYONE | FOLLOWERS | SELECTED | ONLY_ME - the single source of truth for this wardrobe's visibility
+  status         String   @default("ACTIVE") // ACTIVE | ARCHIVED
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  owner           Profile                  @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  occasion        WardrobeOccasion?        @relation(fields: [occasionId], references: [id], onDelete: SetNull)
+  items           WardrobeItem[]
+  selectedViewers WardrobeSelectedViewer[]
+  posts           Post[]
+
+  @@index([ownerId, status])
+  @@map("wardrobes")
+}
+
+model WardrobeItem {
+  wardrobeId String @db.Uuid
+  itemId     String @db.Uuid
+  position   Int // display / reorder order within the wardrobe
+
+  wardrobe Wardrobe @relation(fields: [wardrobeId], references: [id], onDelete: Cascade)
+  item     Item     @relation(fields: [itemId], references: [id], onDelete: Restrict) // API checks this first for a friendly warning; this is the DB-level backstop
+
+  @@id([wardrobeId, itemId])
+  @@index([itemId])
+  @@map("wardrobe_items")
+}
+
+model WardrobeSelectedViewer {
+  wardrobeId String @db.Uuid
+  viewerId   String @db.Uuid
+
+  wardrobe Wardrobe @relation(fields: [wardrobeId], references: [id], onDelete: Cascade)
+  viewer   Profile  @relation(fields: [viewerId], references: [id], onDelete: Cascade)
+
+  @@id([wardrobeId, viewerId])
+  @@map("wardrobe_selected_viewers")
+}

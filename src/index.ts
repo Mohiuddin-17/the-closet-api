@@ -1,0 +1,24 @@
+import express from 'express'; 
+import cors from 'cors'; 
+import helmet from 'helmet'; 
+import dotenv from 'dotenv';
+import profileRoutes from './routes/profile'; 
+import socialRouter from './routes/social';
+import notificationsRouter from './routes/notifications';
+import closetRouter from './routes/closet';
+import wardrobesRouter from './routes/wardrobes';
+import messagesRouter from './routes/messages';
+
+dotenv.config(); 
+const app = express(); 
+const PORT = process.env.PORT || 3000; 
+app.use(helmet()); app.use(cors()); 
+app.use(express.json()); 
+app.get('/health', function (req, res) { res.json({ status: 'ok' }); }); 
+app.listen(PORT, function () { console.log('The Closet API running on http://localhost:' + PORT); });
+app.use('/profiles', profileRoutes);
+app.use('/social', socialRouter);
+app.use('/notifications', notificationsRouter);
+app.use('/closet', closetRouter);
+app.use('/closet/wardrobes', wardrobesRouter);
+app.use('/messages', messagesRouter);
